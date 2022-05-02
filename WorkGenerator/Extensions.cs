@@ -9,10 +9,10 @@ public static class Extensions
         return Batch(items, DefaultBatchSize);
     }
 
-    public static IEnumerable<IEnumerable<T>> Batch<T>(this IEnumerable<T> items, int maxItems)
+    public static IEnumerable<IEnumerable<T>> Batch<T>(this IEnumerable<T> items, int batchSize)
     {
         return items.Select((item, inx) => new { item, inx })
-            .GroupBy(x => x.inx / maxItems)
+            .GroupBy(x => x.inx / batchSize)
             .Select(g => g.Select(x => x.item));
     }
 }

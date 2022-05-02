@@ -18,7 +18,7 @@ public class ProcessingSaga : Saga<ProcessingSagaData>,
     public async Task Handle(StartProcessing message, IMessageHandlerContext context)
     {
         Console.WriteLine($"Processing saga started: '{message.ProcessId}'");
-        Console.WriteLine($"Starting to process {message.WorkCount} work orders.");
+        Console.WriteLine($"Starting the process for '{message.WorkCount}' work orders.");
 
         Data.WorkCount = message.WorkCount;
         Data.StartedAt = DateTime.UtcNow;
@@ -29,35 +29,31 @@ public class ProcessingSaga : Saga<ProcessingSagaData>,
 
     private async Task ImportNextBatch(IMessageHandlerContext context)
     {
-        var importedPages = Data.Progress.ImportedPages();
-        var remainingPages = Data.WorkCount - importedPages;
-        
-        if (Data.Progress.IsAllComplete(Data.WorkCount))
+        if (Data.Progress.AllWorkCompleted(Data.WorkCount))
         {
-            await StartPostWorkProcess(context);
-        }
-        else if (remainingPages > 0)
+            await FinishWork(context);
+        } 
+        else if (Data.Progress.HasRemainingWork(Data.WorkCount))
         {
+            var importedPages = Data.Progress.ImportedPages();
+            var remainingPages = Data.WorkCount - importedPages;
             var range = Enumerable.Range(importedPages + 1, remainingPages);
-            var nextBatch = range.BatchWithDefaultSize().First().ToList();
-
-            Data.Progress.StartNewBatch(nextBatch);
-            await StartWork(nextBatch, context);
+            var nextBatch = range.Batch(batchSize: 100).First().ToList();
+            
+            await SendWorkRequest(nextBatch, context);
         }
     }
 
     public async Task Handle(WorkOrderCompleted message, IMessageHandlerContext context)
     {
-        Data.Progress.MarkPageComplete(message.WorkOrderNo);
+        Data.Progress.MarkWorkComplete(message.WorkOrderNo);
         
-        if (Data.Progress.IsAllComplete(Data.WorkCount))
+        if (Data.Progress.AllWorkCompleted(Data.WorkCount))
         {
-            Console.WriteLine("Checking if it was the last batch of work.");
-            await StartPostWorkProcess(context);
+            await FinishWork(context);
         }
         else if (Data.Progress.IsCurrentBatchCompleted())
         {
-            Console.WriteLine("Importing the next batch of work.");
             await ImportNextBatch(context);
         }
     }
@@ -70,10 +66,12 @@ public class ProcessingSaga : Saga<ProcessingSagaData>,
         return Task.CompletedTask;
     }
 
-    private async Task StartWork(List<int> orders, IMessageHandlerContext context)
+    private async Task SendWorkRequest(List<int> orders, IMessageHandlerContext context)
     {
-        var orderRange = $"{orders[0]} - {orders[^1]}"; 
+        var orderRange = $"{orders[0]} - {orders[^1]}";
         Console.WriteLine($"Queueing next batch of work orders: ({orderRange}).");
+        
+        Data.Progress.StartNewBatch(orders);
         
         foreach (var order in orders)
         {
@@ -85,9 +83,9 @@ public class ProcessingSaga : Saga<ProcessingSagaData>,
         }
     }
     
-    private async Task StartPostWorkProcess(IMessageHandlerContext context)
+    private async Task FinishWork(IMessageHandlerContext context)
     {
-        if (Data.Progress.IsAllComplete(Data.WorkCount))
+        if (Data.Progress.AllWorkCompleted(Data.WorkCount))
         {
             await context.SendLocal(new WorkAllDone
             {
@@ -102,27 +100,27 @@ public class WorkProgress
 {
     public WorkProgress()
     {
-        DonePages = new List<int>();
+        CompletedWork = new List<int>();
         BatchPages = new ConcurrentDictionary<int, bool>();
     }
 
-    public List<int> DonePages { get; set; }
+    public List<int> CompletedWork { get; set; }
     public IDictionary<int, bool> BatchPages { get; set; }
     
-    public void MarkPageComplete(int pageNo)
+    public void MarkWorkComplete(int workNo)
     {
-        DonePages.Add(pageNo);
-        BatchPages[pageNo] = true;
+        CompletedWork.Add(workNo);
+        BatchPages[workNo] = true;
     }
 
-    public bool IsAllComplete(int totalPageCount)
+    public bool AllWorkCompleted(int totalWorkCount)
     {
-        return DonePages.Count == totalPageCount;
+        return CompletedWork.Count == totalWorkCount;
     }
 
     public int ImportedPages()
     {
-        return DonePages.Count;
+        return CompletedWork.Count;
     }
 
     public bool IsCurrentBatchCompleted()
@@ -138,10 +136,22 @@ public class WorkProgress
             BatchPages.Add(p, false);
         }
     }
+
+    public bool HasRemainingWork(int totalWorkCount)
+    {
+        var importedPages = ImportedPages();
+        var remainingPages = totalWorkCount - importedPages;
+        return remainingPages > 0;
+    }
 }
 
 public class ProcessingSagaData : ContainSagaData
 {
+    public ProcessingSagaData()
+    {
+        Progress = new WorkProgress();
+    }
+    
     public Guid ProcessId { get; set; }
     public int WorkCount { get; set; }
     public WorkProgress Progress { get; set; }
